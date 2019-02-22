@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+
+import argparse
+import sys
+import csv
+import re
+import itertools
+import textwrap
+
+def usage_and_quit(ret=0):
+    print(textwrap.dedent('''\
+                ANARCI CSV Utility
+                ==================
+
+                Usage: anarcicsv <tool> [options]
+
+                The following tools are available:
+
+                colfilter   Remove additional (A,B,...) columns from the MSA
+                rowfilter   Remove rows with non-AA characters
+                posmap      Produce TSV output mapping the alignment columns to IMGT numbers
+                a2m         Convert to a2m format
+
+                For help on the tools use "anarcicsv <tool> -h".
+                '''))
+    sys.exit(ret)
+
+def get_sequence_columns(header):
+    """
+    Returns the indices of the ANARCI CSV columns that contain sequence information
+    """
+    return [idx for idx, x in enumerate(header) if re.match('\d+[A-Z]*', x) ]
+
+####################################################################################################
+# OUTER ARGUMENT HANDLING
+####################################################################################################
+
+sys.argv.pop(0) # Remove program name
+if not sys.argv:
+    usage_and_quit(1)
+
+####################################################################################################
+# POSMAP
+####################################################################################################
+
+elif sys.argv[0] == 'posmap':
+    parser = argparse.ArgumentParser(description = "Produce TSV output mapping the alignment columns to IMGT numbers")
+    parser.add_argument('--in', dest='infile', type = argparse.FileType('r'), default = sys.stdin, help = "Input file (ANARCI CSV)")
+    args = parser.parse_args()
+
+    csvreader = csv.reader(args.infile)
+    header = next(csvreader)
+    header = [ header[x] for x in get_sequence_columns(header) ]
+    for num, imgt in enumerate(header):
+        print('{}\t{}'.format(num+1, imgt))
+
+####################################################################################################
+# COLFILTER
+####################################################################################################
+
+elif sys.argv[0] == 'colfilter':
+    parser = argparse.ArgumentParser(description = "Remove extraneous IMGT numbering columns from ANARCI CSV output files, i.e. columns with alphanumeric suffixes. The default behaviour is to exclude CDRs from the removal.")
+    parser.add_argument('--in', dest='infile', type = argparse.FileType('r'), default = sys.stdin, help = "Input file (ANARCI CSV)")
+    parser.add_argument('--all', action = 'store_true', help = 'Drop all extra columns, not only those outside CDRs')
+    parser.add_argument('--empty', action = 'store_true', help = 'Drop columns with only gaps')
+
+    args = parser.parse_args()
+
+    # Read header of input file
+    csvreader = csv.reader(args.infile)
+    header = next(csvreader)
+
+    # Identify the columns that are to be kept
+    ext_header = [ (idx, re.match('(\d+)([A-Z])*', x)) for idx, x in enumerate(header) ]
+    cdr_ranges = (range(27,39), range(56,66), range(105,118))
+
+    if args.all:
+        sel = [ (x,y) for x, y in ext_header if not y or not y.groups()[1] ]
+    else:
+        sel = [ (x,y) for x, y in ext_header if not y or not y.groups()[1] or int(y.groups()[0]) in itertools.chain(*cdr_ranges) ]
+    sel = [ x for x, _ in sel ]
+
+    # Print the remaining rows and filter gap-only if requested
+    rows = []
+    drop = []
+    char_counts = None
+    for row in csvreader:
+        rows.append(row)
+        if not char_counts:
+            char_counts = [0] * len(row)
+        char_counts = [ char_counts[i] + (row[i]!='-') for i in range(len(row)) ]
+
+    if args.empty:
+        drop = [ i for i,x in enumerate(char_counts) if x == 0 ]
+
+    # Print the new header
+    print(','.join([ header[i] for i in sel if i not in drop]))
+    # Print the content
+    for row in rows:
+        print(','.join([row[i] for i in sel if i not in drop ]))
+
+####################################################################################################
+# ROWFILTER
+####################################################################################################
+
+elif sys.argv[0] == 'rowfilter':
+    parser = argparse.ArgumentParser(description = "Remove rows that contain non-aa characters")
+    parser.add_argument('--in', dest='infile', type = argparse.FileType('r'), default = sys.stdin, help = "Input file (ANARCI CSV)")
+    parser.add_argument('--out', dest='outfile', type = argparse.FileType('w'), default = sys.stdout, help = "Output file (ANARCI CSV)")
+    parser.add_argument('--capitalize', action = 'store_true', help = 'Capitalize all residues')
+    args = parser.parse_args()
+
+    ALPH = '-ACDEFGHIKLMNOPQRSTUVWYacdefghiklmnopqrstuvwy'
+
+    csvreader = csv.reader(args.infile)
+    header = next(csvreader)
+    seq_start_col = get_sequence_columns(header)[0]
+
+    csvwriter = csv.writer(args.outfile, quoting=csv.QUOTE_MINIMAL, delimiter=',')
+    csvwriter.writerow(header)
+    for row in csvreader:
+        if not [ char for char in row[seq_start_col:] if char not in ALPH ]:
+            if args.capitalize:
+                csvwriter.writerow(row[:seq_start_col] + [ s.upper() for s in row[seq_start_col:] ])
+            else:
+                csvwriter.writerow(row)
+
+####################################################################################################
+# A2M CONVERTER
+####################################################################################################
+
+elif sys.argv[0] == 'a2m':
+    parser = argparse.ArgumentParser(description = "Convert ANARCI CSV to A2M")
+    parser.add_argument('--in', dest='infile', type = argparse.FileType('r'), default = sys.stdin, help = "Input file (ANARCI CSV)")
+    args = parser.parse_args()
+
+    # Read header of input file
+    csvreader = csv.reader(args.infile)
+    header = next(csvreader)
+
+    # Identify sequence columns
+    seq_cols = [ idx for idx, x in enumerate(header) if re.match('\d+[A-Z]*', x) ]
+
+    # Print FASTA
+    for row in csvreader:
+        print('>' + row[0])
+        print(''.join([ row[i] for i in seq_cols]))
+elif '-h' in sys.argv or '--help' in sys.argv:
+    usage_and_quit(0)
+else:
+    usage_and_quit(1)
